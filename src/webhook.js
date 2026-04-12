@@ -16,6 +16,13 @@
 import express from 'express';
 import { psidStore } from './psid-store.js';
 import { sendAttendanceNotification } from './messenger.js';
+import pg from 'pg';
+
+const { Pool } = pg;
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+});
 
 export function createWebhookServer() {
     const app         = express();
@@ -91,6 +98,31 @@ export function createWebhookServer() {
     app.get('/api/guardian-status/:studentId', (req, res) => {
         const stored = psidStore.get(req.params.studentId);
         res.json({ registered: !!stored?.psid });
+    });
+
+    // ── CLOUD DATABASE SYNC ENDPOINTS ──────────────────────────────────────────
+    app.get('/api/db/sync', async (req, res) => {
+        try {
+            const { rows } = await pool.query('SELECT data FROM global_state WHERE id = 1');
+            res.json({ ok: true, state: rows[0]?.data || {} });
+        } catch (err) {
+            console.error('[DB] Get Sync Error:', err);
+            res.status(500).json({ ok: false, error: err.message });
+        }
+    });
+
+    app.post('/api/db/sync', async (req, res) => {
+        try {
+            const state = req.body;
+            await pool.query(
+                'INSERT INTO global_state (id, data) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET data = $1',
+                [state]
+            );
+            res.json({ ok: true });
+        } catch (err) {
+            console.error('[DB] Post Sync Error:', err);
+            res.status(500).json({ ok: false, error: err.message });
+        }
     });
 
     return app;
