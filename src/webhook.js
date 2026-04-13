@@ -20,7 +20,7 @@ import pg from 'pg';
 
 const { Pool } = pg;
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
+    connectionString: process.env.DATABASE_URL || 'postgresql://neondb_owner:npg_eUrzjP0I7gOD@ep-morning-bonus-akb47ako-pooler.c-3.us-west-2.aws.neon.tech/neondb?sslmode=require',
     ssl: { rejectUnauthorized: false }
 });
 
@@ -115,13 +115,13 @@ export function createWebhookServer() {
         try {
             const state = req.body;
             await pool.query(
-                'INSERT INTO global_state (id, data) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET data = $1',
+                'INSERT INTO global_state (id, data) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET data = global_state.data || $1',
                 [state]
             );
             res.json({ ok: true });
         } catch (err) {
             console.error('[DB] Post Sync Error:', err);
-            res.status(500).json({ ok: false, error: err.message });
+            res.status(500).json({ ok: false, error: err.message || 'Unknown database error' });
         }
     });
 
