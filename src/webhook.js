@@ -186,6 +186,86 @@ export function createWebhookServer() {
         }
     });
 
+    // Dedicated excuse letters table
+    pool.query(`
+        CREATE TABLE IF NOT EXISTS excuse_letters (
+            id              SERIAL      PRIMARY KEY,
+            teacher_id      TEXT        NOT NULL,
+            student_id      TEXT        NOT NULL,
+            student_name    TEXT        NOT NULL,
+            class_code      TEXT        NOT NULL,
+            date            TEXT        NOT NULL,
+            file_name       TEXT        NOT NULL,
+            file_type       TEXT        NOT NULL DEFAULT 'image',
+            data_url        TEXT        NOT NULL,
+            submitted_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            seen            BOOLEAN     NOT NULL DEFAULT FALSE,
+            UNIQUE (teacher_id, student_id, class_code, date)
+        )
+    `).catch(err => console.error('[DB] Excuse table init failed:', err.message));
+
+    // ── POST /api/excuse ───────────────────────────────────────────────────────
+    // Called by student dashboard after uploading an excuse letter.
+    // Body: { teacherId, studentId, studentName, classCode, date, fileName, fileType, dataUrl }
+    app.post('/api/excuse', async (req, res) => {
+        const { teacherId, studentId, studentName, classCode, date, fileName, fileType, dataUrl } = req.body || {};
+        if (!teacherId || !studentId || !classCode || !date || !dataUrl) {
+            return res.status(400).json({ ok: false, error: 'Missing required fields' });
+        }
+        try {
+            await pool.query(
+                `INSERT INTO excuse_letters
+                    (teacher_id, student_id, student_name, class_code, date, file_name, file_type, data_url, submitted_at, seen)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),FALSE)
+                 ON CONFLICT (teacher_id, student_id, class_code, date)
+                 DO UPDATE SET
+                    data_url     = EXCLUDED.data_url,
+                    file_name    = EXCLUDED.file_name,
+                    file_type    = EXCLUDED.file_type,
+                    submitted_at = NOW(),
+                    seen         = FALSE`,
+                [teacherId, studentId, studentName || 'Student', classCode, date,
+                 fileName || 'excuse_letter', fileType || 'image', dataUrl]
+            );
+            console.log(`[Excuse] ${studentName || studentId} submitted excuse for ${classCode} ${date}`);
+            res.json({ ok: true });
+        } catch (err) {
+            console.error('[Excuse] POST error:', err.message);
+            res.status(500).json({ ok: false, error: err.message });
+        }
+    });
+
+    // ── GET /api/excuses/:teacherId ────────────────────────────────────────────
+    // Polled by teacher dashboard to pick up new excuse letters from any device.
+    // Returns: { ok: true, excuses: [...] }  — ordered newest first
+    app.get('/api/excuses/:teacherId', async (req, res) => {
+        try {
+            const { rows } = await pool.query(
+                `SELECT id, student_id, student_name, class_code, date,
+                        file_name, file_type, data_url, submitted_at, seen
+                 FROM excuse_letters
+                 WHERE teacher_id = $1
+                 ORDER BY submitted_at DESC`,
+                [req.params.teacherId]
+            );
+            res.json({ ok: true, excuses: rows });
+        } catch (err) {
+            console.error('[Excuses] GET error:', err.message);
+            res.status(500).json({ ok: false, error: err.message });
+        }
+    });
+
+    // ── PATCH /api/excuse/:id/seen ─────────────────────────────────────────────
+    // Teacher marks an excuse as seen after viewing it.
+    app.patch('/api/excuse/:id/seen', async (req, res) => {
+        try {
+            await pool.query('UPDATE excuse_letters SET seen = TRUE WHERE id = $1', [req.params.id]);
+            res.json({ ok: true });
+        } catch (err) {
+            res.status(500).json({ ok: false, error: err.message });
+        }
+    });
+
 
     // GET /api/db/sync — teacher dashboard polls this to get student scans
     app.get('/api/db/sync', async (req, res) => {
