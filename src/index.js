@@ -25,10 +25,10 @@ import { psidStore }         from './psid-store.js';
 import { createWebhookServer } from './webhook.js';
 
 // ── Start the webhook HTTP server (non-fatal if port is busy) ─────────────────
-const PORT = parseInt(process.env.WEBHOOK_PORT || '3000', 10);
+const PORT = parseInt(process.env.PORT || process.env.WEBHOOK_PORT || '3000', 10);
 const webhookApp = createWebhookServer();
 const httpServer = webhookApp.listen(PORT, () => {
-    console.error(`[AttendEase MCP] Webhook server listening on http://localhost:${PORT}`);
+    console.error(`[AttendEase MCP] Webhook server listening on port ${PORT}`);
     console.error(`[AttendEase MCP] MCP server starting on stdio...`);
 });
 httpServer.on('error', (err) => {
