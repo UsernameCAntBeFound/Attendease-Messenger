@@ -101,13 +101,91 @@ export function createWebhookServer() {
     });
 
     // ── CLOUD DATABASE SYNC ENDPOINTS ──────────────────────────────────────────
-    // Auto-create the table on first use
+    // Auto-create tables on first use
     pool.query(`
         CREATE TABLE IF NOT EXISTS global_state (
             id   INTEGER PRIMARY KEY DEFAULT 1,
             data JSONB   NOT NULL DEFAULT '{}'
         )
     `).catch(err => console.error('[DB] Table init failed:', err.message));
+
+    // Dedicated attendance table — completely separate from the global_state sync
+    pool.query(`
+        CREATE TABLE IF NOT EXISTS attendance_sessions (
+            teacher_id  TEXT        NOT NULL,
+            session_key TEXT        NOT NULL,
+            records     JSONB       NOT NULL DEFAULT '[]',
+            updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (teacher_id, session_key)
+        )
+    `).catch(err => console.error('[DB] Attendance table init failed:', err.message));
+
+    // ── POST /api/scan ─────────────────────────────────────────────────────────
+    // Called by student dashboard immediately after a successful QR scan.
+    // Body: { teacherId, sessionKey, record }
+    // record: { studentId, name, status, timeIn, timeOut, remark, location }
+    app.post('/api/scan', async (req, res) => {
+        const { teacherId, sessionKey, record } = req.body || {};
+        if (!teacherId || !sessionKey || !record || !record.studentId) {
+            return res.status(400).json({ ok: false, error: 'Missing teacherId, sessionKey, or record' });
+        }
+        try {
+            // Read existing records for this session
+            const { rows } = await pool.query(
+                'SELECT records FROM attendance_sessions WHERE teacher_id = $1 AND session_key = $2',
+                [teacherId, sessionKey]
+            );
+
+            let records = rows.length ? rows[0].records : [];
+
+            // Find existing record for this student and update, or add new
+            const idx = records.findIndex(r => r.studentId === record.studentId);
+            if (idx >= 0) {
+                // Preserve existing timeIn when updating timeOut
+                records[idx] = {
+                    ...records[idx],
+                    ...record,
+                    timeIn:  record.timeIn  || records[idx].timeIn  || null,
+                    timeOut: record.timeOut || records[idx].timeOut || null,
+                };
+            } else {
+                records.push(record);
+            }
+
+            await pool.query(
+                `INSERT INTO attendance_sessions (teacher_id, session_key, records, updated_at)
+                 VALUES ($1, $2, $3::jsonb, NOW())
+                 ON CONFLICT (teacher_id, session_key)
+                 DO UPDATE SET records = $3::jsonb, updated_at = NOW()`,
+                [teacherId, sessionKey, JSON.stringify(records)]
+            );
+
+            console.log(`[Scan] ${record.name} → ${sessionKey} (${record.status})`);
+            res.json({ ok: true });
+        } catch (err) {
+            console.error('[Scan] Error:', err.message);
+            res.status(500).json({ ok: false, error: err.message });
+        }
+    });
+
+    // ── GET /api/sessions/:teacherId ───────────────────────────────────────────
+    // Polled by teacher dashboard every 3s to get all live attendance data.
+    // Returns: { ok: true, sessions: { "ENG_2026-04-15": [...records], ... } }
+    app.get('/api/sessions/:teacherId', async (req, res) => {
+        try {
+            const { rows } = await pool.query(
+                'SELECT session_key, records FROM attendance_sessions WHERE teacher_id = $1',
+                [req.params.teacherId]
+            );
+            const sessions = {};
+            rows.forEach(r => { sessions[r.session_key] = r.records; });
+            res.json({ ok: true, sessions });
+        } catch (err) {
+            console.error('[Sessions] Error:', err.message);
+            res.status(500).json({ ok: false, error: err.message });
+        }
+    });
+
 
     // GET /api/db/sync — teacher dashboard polls this to get student scans
     app.get('/api/db/sync', async (req, res) => {
@@ -116,7 +194,24 @@ export function createWebhookServer() {
             if (!rows.length) {
                 return res.json({ ok: true, state: {} });
             }
-            res.json({ ok: true, state: rows[0].data });
+
+            let stateData = rows[0].data;
+
+            // Flatten rogue nested 'state' key if present (caused by old wrapper bug)
+            // Any data inside stateData.state is promoted to the top level
+            if (stateData.state && typeof stateData.state === 'object') {
+                const nested = stateData.state;
+                const { state: _drop, ...rest } = stateData;
+                stateData = { ...nested, ...rest };  // nested keys are overridden by real keys
+
+                // Persist the cleaned version back to DB
+                pool.query(
+                    `UPDATE global_state SET data = $1::jsonb WHERE id = 1`,
+                    [JSON.stringify(stateData)]
+                ).catch(e => console.warn('[DB] Cleanup write failed:', e.message));
+            }
+
+            res.json({ ok: true, state: stateData });
         } catch (err) {
             console.error('[DB] GET /api/db/sync error:', err.message);
             res.status(500).json({ ok: false, error: err.message });
@@ -126,7 +221,9 @@ export function createWebhookServer() {
     // POST /api/db/sync — student phone pushes attendance data here after QR scan
     app.post('/api/db/sync', async (req, res) => {
         try {
-            const incoming = req.body;
+            // cloud-sync.js sends: { state: { attendease_teacher_2: "...", ... } }
+            // We unwrap the 'state' envelope so keys land at the top level of the DB.
+            const incoming = req.body.state || req.body;
             if (!incoming || typeof incoming !== 'object') {
                 return res.status(400).json({ ok: false, error: 'Invalid payload' });
             }
@@ -138,6 +235,9 @@ export function createWebhookServer() {
             // For each key in the incoming state, merge intelligently
             const merged = { ...current };
             for (const [k, v] of Object.entries(incoming)) {
+                // Never store schema version or session in cloud — these are local-only
+                if (k === 'attendease_version') continue;
+                if (k === 'attendease_session') continue;
                 if (k === '__sync_version') { merged[k] = v; continue; }
 
                 if (k.startsWith('attendease_teacher_') && current[k]) {
