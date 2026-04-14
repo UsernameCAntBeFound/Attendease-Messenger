@@ -101,27 +101,97 @@ export function createWebhookServer() {
     });
 
     // ── CLOUD DATABASE SYNC ENDPOINTS ──────────────────────────────────────────
+    // Auto-create the table on first use
+    pool.query(`
+        CREATE TABLE IF NOT EXISTS global_state (
+            id   INTEGER PRIMARY KEY DEFAULT 1,
+            data JSONB   NOT NULL DEFAULT '{}'
+        )
+    `).catch(err => console.error('[DB] Table init failed:', err.message));
+
+    // GET /api/db/sync — teacher dashboard polls this to get student scans
     app.get('/api/db/sync', async (req, res) => {
         try {
             const { rows } = await pool.query('SELECT data FROM global_state WHERE id = 1');
-            res.json({ ok: true, state: rows[0]?.data || {} });
+            if (!rows.length) {
+                return res.json({ ok: true, state: {} });
+            }
+            res.json({ ok: true, state: rows[0].data });
         } catch (err) {
-            console.error('[DB] Get Sync Error:', err);
+            console.error('[DB] GET /api/db/sync error:', err.message);
             res.status(500).json({ ok: false, error: err.message });
         }
     });
 
+    // POST /api/db/sync — student phone pushes attendance data here after QR scan
     app.post('/api/db/sync', async (req, res) => {
         try {
-            const state = req.body;
+            const incoming = req.body;
+            if (!incoming || typeof incoming !== 'object') {
+                return res.status(400).json({ ok: false, error: 'Invalid payload' });
+            }
+
+            // Read current state, deep-merge at the session level, write back
+            const { rows } = await pool.query('SELECT data FROM global_state WHERE id = 1');
+            const current = (rows[0]?.data) || {};
+
+            // For each key in the incoming state, merge intelligently
+            const merged = { ...current };
+            for (const [k, v] of Object.entries(incoming)) {
+                // Never store schema version or session in cloud — these are local-only
+                if (k === 'attendease_version') continue;
+                if (k === 'attendease_session') continue;
+                if (k === '__sync_version') { merged[k] = v; continue; }
+
+                if (k.startsWith('attendease_teacher_') && current[k]) {
+                    // Deep-merge sessions so no scan is ever lost
+                    try {
+                        const cur = typeof current[k] === 'string' ? JSON.parse(current[k]) : current[k];
+                        const inc = typeof v === 'string' ? JSON.parse(v) : v;
+                        const mergedSessions = { ...(cur.sessions || {}), ...(inc.sessions || {}) };
+
+                        // Per-session: merge individual student records
+                        for (const sKey of Object.keys(inc.sessions || {})) {
+                            const curRecs = (cur.sessions || {})[sKey] || [];
+                            const incRecs = inc.sessions[sKey] || [];
+                            const curMap = {};
+                            curRecs.forEach(r => { curMap[r.studentId] = r; });
+                            const final = [];
+                            const seen = new Set();
+                            incRecs.forEach(r => {
+                                seen.add(r.studentId);
+                                const old = curMap[r.studentId];
+                                final.push({
+                                    ...r,
+                                    timeIn:  r.timeIn  || (old && old.timeIn)  || null,
+                                    timeOut: r.timeOut || (old && old.timeOut) || null,
+                                });
+                            });
+                            // Keep curRecs not in incRecs
+                            curRecs.forEach(r => { if (!seen.has(r.studentId)) final.push(r); });
+                            mergedSessions[sKey] = final;
+                        }
+
+                        merged[k] = JSON.stringify({ ...cur, ...inc, sessions: mergedSessions });
+                    } catch {
+                        merged[k] = typeof v === 'string' ? v : JSON.stringify(v);
+                    }
+                } else {
+                    merged[k] = typeof v === 'string' ? v : JSON.stringify(v);
+                }
+            }
+
             await pool.query(
-                'INSERT INTO global_state (id, data) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET data = global_state.data || $1',
-                [state]
+                `INSERT INTO global_state (id, data)
+                 VALUES (1, $1::jsonb)
+                 ON CONFLICT (id) DO UPDATE SET data = $1::jsonb`,
+                [JSON.stringify(merged)]
             );
+
             res.json({ ok: true });
         } catch (err) {
-            console.error('[DB] Post Sync Error:', err);
-            res.status(500).json({ ok: false, error: err.message || 'Unknown database error' });
+            console.error('[DB] POST /api/db/sync error:', err.message);
+            res.status(500).json({ ok: false, error: err.message });
         }
     });
 
