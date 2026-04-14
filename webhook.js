@@ -116,7 +116,24 @@ export function createWebhookServer() {
             if (!rows.length) {
                 return res.json({ ok: true, state: {} });
             }
-            res.json({ ok: true, state: rows[0].data });
+
+            let stateData = rows[0].data;
+
+            // Flatten rogue nested 'state' key if present (caused by old wrapper bug)
+            // Any data inside stateData.state is promoted to the top level
+            if (stateData.state && typeof stateData.state === 'object') {
+                const nested = stateData.state;
+                const { state: _drop, ...rest } = stateData;
+                stateData = { ...nested, ...rest };  // nested keys are overridden by real keys
+
+                // Persist the cleaned version back to DB
+                pool.query(
+                    `UPDATE global_state SET data = $1::jsonb WHERE id = 1`,
+                    [JSON.stringify(stateData)]
+                ).catch(e => console.warn('[DB] Cleanup write failed:', e.message));
+            }
+
+            res.json({ ok: true, state: stateData });
         } catch (err) {
             console.error('[DB] GET /api/db/sync error:', err.message);
             res.status(500).json({ ok: false, error: err.message });
@@ -126,7 +143,9 @@ export function createWebhookServer() {
     // POST /api/db/sync — student phone pushes attendance data here after QR scan
     app.post('/api/db/sync', async (req, res) => {
         try {
-            const incoming = req.body;
+            // cloud-sync.js sends: { state: { attendease_teacher_2: "...", ... } }
+            // We unwrap the 'state' envelope so keys land at the top level of the DB.
+            const incoming = req.body.state || req.body;
             if (!incoming || typeof incoming !== 'object') {
                 return res.status(400).json({ ok: false, error: 'Invalid payload' });
             }
