@@ -2,7 +2,7 @@
   "mcpServers": {
     "attendease-messenger": {
       "command": "node",
-      "args": ["C:/Users/jcalv/Downloads/AttendEase/messenger-mcp/src/index.js"],
+      "args": ["C:/Users/jcalv/Downloads/AttenEase Proto0.1/messenger-mcp-2/src/index.js"],
       "env": {
         "FB_PAGE_ACCESS_TOKEN": "EAAYtk2uArHsBRO6EJfjQ4ZASCzxH5TmBuVkoLmJ23wUts6vIGrsdKUzwrpka3CArZBPHKMNVJO4yjWpW8FsFkeumuOKIzgpI6I5KAk4M6jJPHCzWiUqQZA6Dp2u00dgJcE5kkKyVCBEKppqTPLkYLGCPZCZBnzZCmSraJgZBZAAClbhGwOunc24eubC7j613ZAsDeEMQejwZDZD",
         "FB_PAGE_ID":           "1108410535681392",
