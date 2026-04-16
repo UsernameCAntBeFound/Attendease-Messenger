@@ -17,6 +17,21 @@ import express from 'express';
 import { sendAttendanceNotification, sendMessage } from './messenger.js';
 import pg from 'pg';
 
+import axios from 'axios';
+
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://ghcdhisbqjixzzvlmjxt.supabase.co';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdoY2RoaXNicWppeHp6dmxtanh0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyNzkzMjAsImV4cCI6MjA5MTg1NTMyMH0.Xc4gWBRhcgY46HfLPnlqcu-ZUnQ5mPTsMtCyXKF2zSw';
+
+const supabaseRest = axios.create({
+    baseURL: `${SUPABASE_URL}/rest/v1`,
+    headers: {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation'
+    }
+});
+
 const { Pool } = pg;
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL || 'postgresql://neondb_owner:npg_eUrzjP0I7gOD@ep-morning-bonus-akb47ako-pooler.c-3.us-west-2.aws.neon.tech/neondb?sslmode=require',
@@ -72,16 +87,7 @@ export function createWebhookServer() {
         res.json({ status: 'ok', server: 'AttendEase Messenger MCP', ts: new Date().toISOString() });
     });
 
-    // Auto-create guardian table
-    pool.query(`
-        CREATE TABLE IF NOT EXISTS guardian_psids (
-            student_id TEXT PRIMARY KEY,
-            psid TEXT NOT NULL,
-            registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-    `).catch(err => console.error('[DB] PSID table init failed:', err.message));
-
-    // ── POST /api/notify — Send a Messenger notification from the teacher dashboard ──
+    // API for teacher dashboard to send Messenger notification
     app.post('/api/notify', async (req, res) => {
         const { studentId, studentName, status, className, date, remark } = req.body;
         if (!studentId || !studentName || !status || !className || !date) {
@@ -89,15 +95,16 @@ export function createWebhookServer() {
         }
         
         try {
-            const { rows } = await pool.query('SELECT psid FROM guardian_psids WHERE student_id = $1', [studentId]);
-            if (rows.length === 0) {
+            // Query Supabase REST instead of Neon
+            const { data } = await supabaseRest.get(`/guardian_psids?student_id=eq.${studentId}`);
+            if (!data || data.length === 0) {
                 return res.json({
                     ok: false,
                     message: `No Messenger registered for ${studentName}. Guardian must message the Facebook Page with: REGISTER ${studentId}`,
                 });
             }
             
-            await sendAttendanceNotification(rows[0].psid, { studentName, status, className, date, remark: remark || '' });
+            await sendAttendanceNotification(data[0].psid, { studentName, status, className, date, remark: remark || '' });
             res.json({ ok: true, message: `Notification sent to guardian of ${studentName}` });
         } catch (err) {
             console.error('[Notify] Error:', err.message);
@@ -108,8 +115,8 @@ export function createWebhookServer() {
     // ── GET /api/guardian-status/:studentId — Check if a guardian is registered ──
     app.get('/api/guardian-status/:studentId', async (req, res) => {
         try {
-            const { rows } = await pool.query('SELECT psid FROM guardian_psids WHERE student_id = $1', [req.params.studentId]);
-            res.json({ registered: rows.length > 0 });
+            const { data } = await supabaseRest.get(`/guardian_psids?student_id=eq.${req.params.studentId}`);
+            res.json({ registered: !!(data && data.length > 0) });
         } catch (err) {
             res.json({ registered: false });
         }
@@ -416,20 +423,22 @@ async function handleMessagingEvent(event) {
         const studentId = match[1].trim();
         
         try {
-            await pool.query(
-                `INSERT INTO guardian_psids (student_id, psid, registered_at) 
-                 VALUES ($1, $2, NOW()) 
-                 ON CONFLICT (student_id) DO UPDATE SET psid = $2, registered_at = NOW()`,
-                [studentId, psid]
+            // Upsert directly to Supabase via REST
+            await supabaseRest.post('/guardian_psids', 
+                { student_id: studentId, psid: psid, registered_at: new Date().toISOString() },
+                { headers: { 'Prefer': 'resolution=merge-duplicates' } } // This triggers Postgres ON CONFLICT DO UPDATE
             );
+            
             console.log(`[Webhook] ✅ Registered guardian PSID ${psid} → student ${studentId} in Supabase`);
             
-            // Send confirmation reply to guardian
             sendMessage(psid, {
                 text: `✅ You are now registered for attendance alerts for student ${studentId}.\n\nYou will receive a Messenger notification whenever your child is marked absent or late. 📚`
             }).catch(err => console.error('[Webhook] Reply failed:', err.message));
         } catch (err) {
             console.error('[Webhook] Failed to save PSID to Supabase:', err.message);
+            sendMessage(psid, {
+                text: `⚠ Failed to connect to database. Please try again in a moment.`
+            }).catch(() => {});
         }
         return;
     }
