@@ -96,7 +96,7 @@ export function createWebhookServer() {
         
         try {
             // Query Supabase REST instead of Neon
-            const { data } = await supabaseRest.get(`/guardian_psids?student_id=eq.${studentId}`);
+            const { data } = await supabaseRest.get(`guardian_psids?student_id=eq.${studentId}`);
             if (!data || data.length === 0) {
                 return res.json({
                     ok: false,
@@ -115,7 +115,7 @@ export function createWebhookServer() {
     // ── GET /api/guardian-status/:studentId — Check if a guardian is registered ──
     app.get('/api/guardian-status/:studentId', async (req, res) => {
         try {
-            const { data } = await supabaseRest.get(`/guardian_psids?student_id=eq.${req.params.studentId}`);
+            const { data } = await supabaseRest.get(`guardian_psids?student_id=eq.${req.params.studentId}`);
             res.json({ registered: !!(data && data.length > 0) });
         } catch (err) {
             res.json({ registered: false });
@@ -424,7 +424,7 @@ async function handleMessagingEvent(event) {
         
         try {
             // Upsert directly to Supabase via REST
-            await supabaseRest.post('/guardian_psids', 
+            await supabaseRest.post('guardian_psids', 
                 { student_id: studentId, psid: psid, registered_at: new Date().toISOString() },
                 { headers: { 'Prefer': 'resolution=merge-duplicates' } } // This triggers Postgres ON CONFLICT DO UPDATE
             );
