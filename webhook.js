@@ -14,7 +14,6 @@
  */
 
 import express from 'express';
-import { psidStore } from './psid-store.js';
 import { sendAttendanceNotification, sendMessage } from './messenger.js';
 import pg from 'pg';
 
@@ -73,31 +72,47 @@ export function createWebhookServer() {
         res.json({ status: 'ok', server: 'AttendEase Messenger MCP', ts: new Date().toISOString() });
     });
 
+    // Auto-create guardian table
+    pool.query(`
+        CREATE TABLE IF NOT EXISTS guardian_psids (
+            student_id TEXT PRIMARY KEY,
+            psid TEXT NOT NULL,
+            registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `).catch(err => console.error('[DB] PSID table init failed:', err.message));
+
     // ── POST /api/notify — Send a Messenger notification from the teacher dashboard ──
     app.post('/api/notify', async (req, res) => {
         const { studentId, studentName, status, className, date, remark } = req.body;
         if (!studentId || !studentName || !status || !className || !date) {
             return res.status(400).json({ ok: false, message: 'Missing required fields.' });
         }
-        const stored = psidStore.get(studentId);
-        if (!stored?.psid) {
-            return res.json({
-                ok: false,
-                message: `No Messenger registered for ${studentName}. Guardian must message the Facebook Page with: REGISTER ${studentId}`,
-            });
-        }
+        
         try {
-            await sendAttendanceNotification(stored.psid, { studentName, status, className, date, remark: remark || '' });
+            const { rows } = await pool.query('SELECT psid FROM guardian_psids WHERE student_id = $1', [studentId]);
+            if (rows.length === 0) {
+                return res.json({
+                    ok: false,
+                    message: `No Messenger registered for ${studentName}. Guardian must message the Facebook Page with: REGISTER ${studentId}`,
+                });
+            }
+            
+            await sendAttendanceNotification(rows[0].psid, { studentName, status, className, date, remark: remark || '' });
             res.json({ ok: true, message: `Notification sent to guardian of ${studentName}` });
         } catch (err) {
+            console.error('[Notify] Error:', err.message);
             res.json({ ok: false, message: `Send failed: ${err.message}` });
         }
     });
 
     // ── GET /api/guardian-status/:studentId — Check if a guardian is registered ──
-    app.get('/api/guardian-status/:studentId', (req, res) => {
-        const stored = psidStore.get(req.params.studentId);
-        res.json({ registered: !!stored?.psid });
+    app.get('/api/guardian-status/:studentId', async (req, res) => {
+        try {
+            const { rows } = await pool.query('SELECT psid FROM guardian_psids WHERE student_id = $1', [req.params.studentId]);
+            res.json({ registered: rows.length > 0 });
+        } catch (err) {
+            res.json({ registered: false });
+        }
     });
 
     // ── CLOUD DATABASE SYNC ENDPOINTS ──────────────────────────────────────────
@@ -385,7 +400,7 @@ export function createWebhookServer() {
  * The webhook stores their PSID linked to that student ID.
  * The teacher can then use the MCP notify_guardian tool to send notifications.
  */
-function handleMessagingEvent(event) {
+async function handleMessagingEvent(event) {
     // Only handle standard text messages
     if (!event.message || event.message.is_echo) return;
 
@@ -399,13 +414,23 @@ function handleMessagingEvent(event) {
     const match = text.match(/register\s+(.+)/i) || (text.match(/^(20\d{2}-\d{5}|uid-\d+)$/i) ? [null, text] : null);
     if (match) {
         const studentId = match[1].trim();
-        psidStore.set(studentId, '', psid);
-        console.log(`[Webhook] ✅ Registered guardian PSID ${psid} → student ${studentId}`);
-
-        // Send confirmation reply to guardian
-        sendMessage(psid, {
-            text: `✅ You are now registered for attendance alerts for student ${studentId}.\n\nYou will receive a Messenger notification whenever your child is marked absent or late. 📚`
-        }).catch(err => console.error('[Webhook] Reply failed:', err.message));
+        
+        try {
+            await pool.query(
+                `INSERT INTO guardian_psids (student_id, psid, registered_at) 
+                 VALUES ($1, $2, NOW()) 
+                 ON CONFLICT (student_id) DO UPDATE SET psid = $2, registered_at = NOW()`,
+                [studentId, psid]
+            );
+            console.log(`[Webhook] ✅ Registered guardian PSID ${psid} → student ${studentId} in Supabase`);
+            
+            // Send confirmation reply to guardian
+            sendMessage(psid, {
+                text: `✅ You are now registered for attendance alerts for student ${studentId}.\n\nYou will receive a Messenger notification whenever your child is marked absent or late. 📚`
+            }).catch(err => console.error('[Webhook] Reply failed:', err.message));
+        } catch (err) {
+            console.error('[Webhook] Failed to save PSID to Supabase:', err.message);
+        }
         return;
     }
 
