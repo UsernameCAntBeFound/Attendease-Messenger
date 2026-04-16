@@ -395,7 +395,8 @@ function handleMessagingEvent(event) {
     console.log(`[Webhook] Message from PSID ${psid}: "${text}"`);
 
     // Registration command: REGISTER <studentId>
-    const match = text.match(/^register\s+(.+)$/i);
+    // We'll also accept just the ID if it looks like YYYY-XXXXX or UID-XXXX
+    const match = text.match(/register\s+(.+)/i) || (text.match(/^(20\d{2}-\d{5}|uid-\d+)$/i) ? [null, text] : null);
     if (match) {
         const studentId = match[1].trim();
         psidStore.set(studentId, '', psid);
@@ -409,11 +410,16 @@ function handleMessagingEvent(event) {
     }
 
     // INFO command: show usage
-    if (/^(info|help|start)$/i.test(text)) {
+    if (/^(info|help|start|hello|hi)$/i.test(text)) {
         console.log(`[Webhook] Help request from PSID ${psid}`);
-        // Optionally auto-reply with instructions
+        sendMessage(psid, {
+            text: `👋 Welcome to the AttendEase Notifier.\n\nTo link your account to receive attendance alerts, please reply with "REGISTER" followed by the Student ID.\n\nExample: REGISTER 2026-00001`
+        }).catch(err => console.error('[Webhook] Help reply failed:', err.message));
         return;
     }
 
     console.log(`[Webhook] Unrecognised message from ${psid}: "${text}"`);
+    sendMessage(psid, {
+        text: `🤔 I didn't quite catch that.\n\nIf you want to register for a student's alerts, please format your message like this:\nREGISTER 2026-00001`
+    }).catch(err => console.error('[Webhook] Fallback reply failed:', err.message));
 }
