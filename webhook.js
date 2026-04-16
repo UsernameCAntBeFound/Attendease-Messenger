@@ -90,8 +90,8 @@ export function createWebhookServer() {
     // API for teacher dashboard to send Messenger notification
     app.post('/api/notify', async (req, res) => {
         const { studentId, studentName, status, className, date, remark } = req.body;
-        if (!studentId || !studentName || !status || !className || !date) {
-            return res.status(400).json({ ok: false, message: 'Missing required fields.' });
+        if (!studentId || !studentName) {
+            return res.status(400).json({ ok: false, message: 'Missing required student info.' });
         }
         
         try {
